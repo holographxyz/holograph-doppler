@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 /**
  * ----------------------------------------------------------------------------
- * @title HolographOrchestrator – oApp core (Holograph 2.0)
+ * @title HolographFactory – oApp core (Holograph 2.0)
  * ----------------------------------------------------------------------------
  * @notice  Primary entry‑point contract that
  *          1. launches new tokens through Doppler Airlock on the *source* chain;
@@ -60,7 +60,7 @@ interface IMintableERC20 {
 // ──────────────────────────────────────────────────────────────────────────
 //  Contract
 // ──────────────────────────────────────────────────────────────────────────
-contract HolographOrchestrator is Ownable, Pausable, ReentrancyGuard, ILZReceiverV2 {
+contract HolographFactory is Ownable, Pausable, ReentrancyGuard, ILZReceiverV2 {
     using SafeERC20 for IERC20;
 
     // ──────────────────────────────────────────────────────────────────────

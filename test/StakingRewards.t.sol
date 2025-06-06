@@ -55,7 +55,7 @@ contract StakingRewardsTest is Test {
         vm.prank(feeRouter);
         hlg.approve(address(staking), rewardAmt);
         vm.prank(feeRouter);
-        staking.notifyReward(rewardAmt);
+        staking.addRewards(rewardAmt);
 
         uint256 earned = staking.earned(alice);
         assertApproxEqAbs(earned, rewardAmt, 1); // allow 1-wei rounding
@@ -89,16 +89,16 @@ contract StakingRewardsTest is Test {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    //  FeeRouter only notifyReward
+    //  FeeRouter only addRewards
     // ──────────────────────────────────────────────────────────────────────────
-    function testNotifyRewardOnlyRouter() public {
+    function testAddRewardsOnlyRouter() public {
         uint256 amt = 1 ether;
         hlg.mint(alice, amt);
         vm.prank(alice);
         hlg.approve(address(staking), amt);
         vm.prank(alice);
         vm.expectRevert(StakingRewards.FeeRouterOnly.selector);
-        staking.notifyReward(amt);
+        staking.addRewards(amt);
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -118,7 +118,7 @@ contract StakingRewardsTest is Test {
         vm.prank(feeRouter);
         hlg.approve(address(staking), rewardAmt);
         vm.prank(feeRouter);
-        staking.notifyReward(rewardAmt);
+        staking.addRewards(rewardAmt);
 
         uint256 earned = staking.earned(alice);
         assertApproxEqAbs(earned, rewardAmt, 1000000); // Allow reasonable delta for precision

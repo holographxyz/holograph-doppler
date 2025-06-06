@@ -15,10 +15,10 @@ pragma solidity ^0.8.24;
  * ---------
  * • **Stake**   – User deposits HLG → increases their stake + updates rewards.
  * • **Withdraw**– User removes a portion/all of their stake; guarded by an
- *                 optional cooldown (default 7 days).
+ *                 optional cooldown (default 7 days).
  * • **Claim**   – User collects their accumulated HLG rewards.
- * • **notifyReward** – Called by FeeRouter when fresh HLG fees arrive; reward
- *                     is distributed pro‑rata to all stakers instantly.
+ * • **addRewards** – Called by FeeRouter when fresh HLG fees arrive; reward
+ *                     is distributed pro-rata to all stakers instantly.
  * • **Owner**   – May pause/unpause, change cooldown length, set a new
  *                 FeeRouter, or recover non‑HLG tokens.
  *
@@ -55,7 +55,8 @@ contract StakingRewards is Ownable, ReentrancyGuard, Pausable {
     /// @notice The HLG ERC‑20 token that users stake and that rewards are paid in.
     IERC20 public immutable HLG;
 
-    /// @notice Address of the FeeRouter that is authorised to feed rewards.
+    /// @notice Address of the FeeRouter that is authorised to call
+    ///         {addRewards}.
     address public feeRouter;
 
     /// @notice Cooldown (in seconds) required between last stake and withdraw.
@@ -82,7 +83,7 @@ contract StakingRewards is Ownable, ReentrancyGuard, Pausable {
     event Staked(address indexed user, uint256 amount);
     event Withdrawn(address indexed user, uint256 amount);
     event RewardPaid(address indexed user, uint256 amount);
-    event RewardNotified(uint256 amount);
+    event RewardAdded(uint256 amount);
     event CooldownUpdated(uint256 seconds_);
     event FeeRouterUpdated(address feeRouter);
 
@@ -92,7 +93,7 @@ contract StakingRewards is Ownable, ReentrancyGuard, Pausable {
     /**
      * @param _hlg        Address of the immutable HLG token.
      * @param _feeRouter  Initial FeeRouter address authorised to call
-     *                    {notifyReward}.
+     *                    {addRewards}.
      */
     constructor(address _hlg, address _feeRouter) Ownable(msg.sender) {
         if (_hlg == address(0) || _feeRouter == address(0)) revert ZeroAddress();
@@ -179,7 +180,7 @@ contract StakingRewards is Ownable, ReentrancyGuard, Pausable {
      *         `rewardPerTokenStored`.
      * @param  amount Amount of HLG transferred from the FeeRouter.
      */
-    function notifyReward(uint256 amount) external nonReentrant updateReward(address(0)) {
+    function addRewards(uint256 amount) external nonReentrant updateReward(address(0)) {
         if (msg.sender != feeRouter) revert FeeRouterOnly();
         if (amount == 0) revert ZeroAmount();
         HLG.safeTransferFrom(msg.sender, address(this), amount);
@@ -187,7 +188,7 @@ contract StakingRewards is Ownable, ReentrancyGuard, Pausable {
         if (totalStaked > 0) {
             rewardPerTokenStored += (amount * 1e18) / totalStaked;
         }
-        emit RewardNotified(amount);
+        emit RewardAdded(amount);
     }
 
     // ──────────────────────────────────────────────────────────────────────────

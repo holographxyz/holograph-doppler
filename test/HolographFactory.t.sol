@@ -3,7 +3,7 @@ pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
 import "forge-std/console.sol";
-import {HolographOrchestrator, CreateParams} from "src/HolographOrchestrator.sol";
+import {HolographFactory, CreateParams} from "src/HolographFactory.sol";
 import {CreateParams} from "lib/doppler/src/Airlock.sol";
 
 // Import additional v4-core dependencies not included in AirlockMiner.sol
@@ -38,9 +38,7 @@ library DopplerAddrBook {
         address dopplerDeployer;
     }
 
-    function get() internal pure returns (DopplerAddrs memory) {
-        // Default to testnet, but allow override with MAINNET=true
-        bool useMainnet = vm.envOr("MAINNET", false);
+    function get(bool useMainnet) internal pure returns (DopplerAddrs memory) {
         return useMainnet ? getMainnet() : getTestnet();
     }
 
@@ -48,12 +46,12 @@ library DopplerAddrBook {
         return
             DopplerAddrs({
                 poolManager: 0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408,
-                airlock: 0x0d2f38d807bfAd5C18e430516e10ab560D300caF,
-                tokenFactory: 0x4B0EC16Eb40318Ca5A4346f20F04A2285C19675B,
-                dopplerDeployer: 0x40Bcb4dDA3BcF7dba30C5d10c31EE2791ed9ddCa,
-                governanceFactory: 0x65dE470Da664A5be139A5D812bE5FDa0d76CC951,
-                v4Initializer: 0xA36715dA46Ddf4A769f3290f49AF58bF8132ED8E,
-                migrator: 0xC541FBddfEEf798E50d257495D08efe00329109A
+                airlock: 0x7E6cF695a8BeA4b2bF94FbB5434a7da3f39A2f8D,
+                tokenFactory: 0xAd62fc9eEbbDC2880c0d4499B0660928d13405cE,
+                dopplerDeployer: 0x7980Be665C8011A413c598F82fa6f95feACa2e1e,
+                governanceFactory: 0xff02a43A90c25941f8c5f4917eaD79EB33C3011C,
+                v4Initializer: 0x511b44b4cC8Cb80223F203E400309b010fEbFAec,
+                migrator: 0x8f4814999D2758ffA69689A37B0ce225C1eEcBFf
             });
     }
 
@@ -114,7 +112,7 @@ contract V4InitializerStub {
     }
 }
 
-contract OrchestratorLaunchTest is Test {
+contract HolographFactoryTest is Test {
     // ── constants ─────────────────────────────────────────────────────────
     uint256 private constant LAUNCH_FEE = 0.1 ether;
     uint256 private constant DEFAULT_NUM_TOKENS_TO_SELL = 100_000e18;
@@ -128,16 +126,15 @@ contract OrchestratorLaunchTest is Test {
     int24 private constant DEFAULT_TICK_SPACING = 8;
 
     DopplerAddrBook.DopplerAddrs private doppler;
-    HolographOrchestrator private orchestrator;
+    HolographFactory private factory;
     FeeRouterMock private feeRouter;
     LZEndpointStub private lzEndpoint;
     address private creator = address(0xCAFE);
 
     function setUp() public {
-        doppler = DopplerAddrBook.get();
-
-        // Choose network based on MAINNET environment variable
+        // Choose network based on MAINNET environment variable (defaults to testnet)
         bool useMainnet = vm.envOr("MAINNET", false);
+        doppler = DopplerAddrBook.get(useMainnet);
 
         if (useMainnet) {
             // Base mainnet has chain ID 8453
@@ -158,8 +155,8 @@ contract OrchestratorLaunchTest is Test {
 
         lzEndpoint = new LZEndpointStub();
         feeRouter = new FeeRouterMock();
-        orchestrator = new HolographOrchestrator(address(lzEndpoint), doppler.airlock, address(feeRouter));
-        orchestrator.setLaunchFee(LAUNCH_FEE);
+        factory = new HolographFactory(address(lzEndpoint), doppler.airlock, address(feeRouter));
+        factory.setLaunchFee(LAUNCH_FEE);
         vm.deal(creator, 1 ether);
 
         bool useV4Stub = vm.envOr("USE_V4_STUB", false);
@@ -301,9 +298,9 @@ contract OrchestratorLaunchTest is Test {
         }
 
         // 5) Execute the token creation
-        bytes memory callData = abi.encodeWithSelector(orchestrator.createToken.selector, createParams);
+        bytes memory callData = abi.encodeWithSelector(factory.createToken.selector, createParams);
         vm.prank(creator);
-        (bool ok, bytes memory returndata) = address(orchestrator).call{value: LAUNCH_FEE}(callData);
+        (bool ok, bytes memory returndata) = address(factory).call{value: LAUNCH_FEE}(callData);
 
         console.log("createToken success? ", ok);
         if (!ok) {
