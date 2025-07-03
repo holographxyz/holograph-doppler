@@ -30,11 +30,11 @@ pragma solidity ^0.8.24;
  * ----------------------------------------------------------------------------
  */
 
-import "@openzeppelin/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/token/ERC20/IERC20.sol";
-import "@openzeppelin/access/Ownable.sol";
-import "@openzeppelin/utils/ReentrancyGuard.sol";
-import "@openzeppelin/utils/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 
 contract StakingRewards is Ownable, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;

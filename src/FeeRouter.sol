@@ -28,12 +28,12 @@ pragma solidity ^0.8.24;
  * ----------------------------------------------------------------------------
  */
 
-import "@openzeppelin/access/Ownable.sol";
-import "@openzeppelin/access/AccessControl.sol";
-import "@openzeppelin/utils/ReentrancyGuard.sol";
-import "@openzeppelin/utils/Pausable.sol";
-import "@openzeppelin/token/ERC20/IERC20.sol";
-import "@openzeppelin/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/ILZEndpointV2.sol";
 import "./interfaces/ILZReceiverV2.sol";
 import "./interfaces/IWETH9.sol";

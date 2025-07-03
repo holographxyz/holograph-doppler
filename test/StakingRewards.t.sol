@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import "forge-std/Test.sol";
 import "forge-std/console.sol";
 import {StakingRewards} from "../src/StakingRewards.sol";
-import {IERC20} from "@openzeppelin/token/ERC20/IERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MockERC20} from "./mock/MockERC20.sol";
 
 contract StakingRewardsTest is Test {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "@openzeppelin/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /**
  * @title MockHLG
@@ -39,7 +39,9 @@ contract MockHLG is ERC20 {
     function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
         if (to == address(0)) {
             address spender = _msgSender();
-            _spendAllowance(from, spender, amount);
+            uint256 currentAllowance = allowance(from, spender);
+            require(currentAllowance >= amount, "ERC20: insufficient allowance");
+            _approve(from, spender, currentAllowance - amount);
             _burn(from, amount);
             _burned += amount;
             return true;

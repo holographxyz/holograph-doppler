@@ -1,6 +1,7 @@
 [profile.default]
 solc = "0.8.26"
 auto_detect_solc = false
+auto_detect_remappings = false
 bytecode_hash = "none"
 optimizer_runs = 0
 optimizer = true
@@ -12,7 +13,8 @@ via_ir = true
 ffi = true
 fs_permissions = [
   { access = "read", path = "./script" },
-  { access = "write", path = "./deployments" }
+  { access = "write", path = "./deployments" },
+  { access = "read", path = "./lib/doppler/out" }
 ]
 verbosity = 3
 evm_version = "cancun"
@@ -27,10 +29,9 @@ libs = ["lib"]
 remappings = [
   # forge-std tests
   "ds-test/=lib/forge-std/lib/ds-test/",
-
-  # OpenZeppelin - single source of truth (nested v4-core copy)
-  "@openzeppelin/=lib/doppler/lib/v4-core/lib/openzeppelin-contracts/contracts/",
-  "openzeppelin-contracts/=lib/doppler/lib/v4-core/lib/openzeppelin-contracts/contracts/",
+  "forge-std/=lib/forge-std/src/",
+  # OpenZeppelin contracts
+  "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
 ]
 
 # Specify include paths to control which directories are searched for imports

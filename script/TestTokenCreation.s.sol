@@ -5,10 +5,10 @@ import "forge-std/Script.sol";
 import "forge-std/console.sol";
 import "../src/HolographFactory.sol";
 import {CreateParams} from "../src/interfaces/DopplerStructs.sol";
-import "../src/interfaces/ITokenFactory.sol";
-import "../src/interfaces/IGovernanceFactory.sol";
-import "../src/interfaces/IPoolInitializer.sol";
-import "../src/interfaces/ILiquidityMigrator.sol";
+import {ITokenFactory} from "../test/doppler/interfaces/ITokenFactory.sol";
+import {IGovernanceFactory} from "../test/doppler/interfaces/IGovernanceFactory.sol";
+import {IPoolInitializer} from "../test/doppler/interfaces/IPoolInitializer.sol";
+import {ILiquidityMigrator} from "../test/doppler/interfaces/ILiquidityMigrator.sol";
 
 contract TestTokenCreation is Script {
     function run() external {
@@ -50,21 +50,34 @@ contract TestTokenCreation is Script {
             8 // tickSpacing
         );
 
-        CreateParams memory params = CreateParams({
-            initialSupply: 100000 ether,
-            numTokensToSell: 100000 ether,
-            numeraire: address(0),
-            tokenFactory: ITokenFactory(0xAd62fc9eEbbDC2880c0d4499B0660928d13405cE),
-            tokenFactoryData: tokenFactoryData,
-            governanceFactory: IGovernanceFactory(0xff02a43A90c25941f8c5f4917eaD79EB33C3011C),
-            governanceFactoryData: governanceData,
-            poolInitializer: IPoolInitializer(0x511b44b4cC8Cb80223F203E400309b010fEbFAec),
-            poolInitializerData: poolInitializerData,
-            liquidityMigrator: ILiquidityMigrator(0x8f4814999D2758ffA69689A37B0ce225C1eEcBFf),
-            liquidityMigratorData: "",
-            integrator: address(0),
-            salt: bytes32(uint256(10422))
-        });
+        CreateParams memory params;
+        params.initialSupply = 100000 ether;
+        params.numTokensToSell = 100000 ether;
+        params.numeraire = address(0);
+        params.tokenFactoryData = tokenFactoryData;
+        params.governanceFactoryData = governanceData;
+        params.poolInitializerData = poolInitializerData;
+        params.liquidityMigratorData = "";
+        params.integrator = address(0);
+        params.salt = bytes32(uint256(10422));
+        
+        // Use assembly to set interface fields to avoid type conflicts
+        // These are the same interfaces but from different import paths
+        address tokenFactoryAddr = 0xc69Ba223c617F7D936B3cf2012aa644815dBE9Ff;
+        address governanceFactoryAddr = 0x9dBFaaDC8c0cB2c34bA698DD9426555336992e20;
+        address poolInitializerAddr = 0xca2079706A4c2a4a1aA637dFB47d7f27Fe58653F;
+        address liquidityMigratorAddr = 0x04a898f3722c38F9Def707bD17DC78920EFA977C;
+        
+        assembly {
+            // tokenFactory at offset 0x60 (96 decimal) - field #4
+            mstore(add(params, 0x60), tokenFactoryAddr)
+            // governanceFactory at offset 0xA0 (160 decimal) - field #6
+            mstore(add(params, 0xA0), governanceFactoryAddr)
+            // poolInitializer at offset 0xE0 (224 decimal) - field #8
+            mstore(add(params, 0xE0), poolInitializerAddr)
+            // liquidityMigrator at offset 0x120 (288 decimal) - field #10
+            mstore(add(params, 0x120), liquidityMigratorAddr)
+        }
 
         vm.startPrank(testAccount);
 

@@ -5,22 +5,14 @@ import "forge-std/Test.sol";
 import "forge-std/console.sol";
 import {HolographFactory, CreateParams} from "src/HolographFactory.sol";
 
-// Import additional v4-core dependencies not included in AirlockMiner.sol
-import {TickMath} from "lib/doppler/lib/v4-core/src/libraries/TickMath.sol";
-import {Hooks as HooksLib} from "lib/doppler/lib/v4-core/src/libraries/Hooks.sol";
-import {LPFeeLibrary} from "lib/doppler/lib/v4-core/src/libraries/LPFeeLibrary.sol";
-import {IHooks} from "lib/doppler/lib/v4-core/src/interfaces/IHooks.sol";
-
-// Import AirlockMiner which includes Hooks, PoolManager, DERC20, Doppler, Airlock, and UniswapV4Initializer
-// This also imports ITokenFactory, but we need to import the other interfaces separately
-import "lib/doppler/test/shared/AirlockMiner.sol";
-import {IGovernanceFactory} from "lib/doppler/src/interfaces/IGovernanceFactory.sol";
-import {IPoolInitializer} from "lib/doppler/src/interfaces/IPoolInitializer.sol";
-import {ILiquidityMigrator} from "lib/doppler/src/interfaces/ILiquidityMigrator.sol";
-import {IPoolManager} from "lib/doppler/lib/v4-core/src/interfaces/IPoolManager.sol";
-
-// Import DopplerDeployer specifically to avoid conflicts
-import {DopplerDeployer} from "lib/doppler/src/UniswapV4Initializer.sol";
+// Standalone imports for mining
+import "./doppler/UniswapV4Types.sol";
+import {DopplerMiner} from "./doppler/DopplerMiner.sol";
+import {IDopplerDeployer} from "./doppler/DopplerDeployer.sol";
+import {IGovernanceFactory} from "./doppler/interfaces/IGovernanceFactory.sol";
+import {IPoolInitializer} from "./doppler/interfaces/IPoolInitializer.sol";
+import {ILiquidityMigrator} from "./doppler/interfaces/ILiquidityMigrator.sol";
+import {ITokenFactory} from "./doppler/interfaces/ITokenFactory.sol";
 
 contract DopplerHookStub {
     fallback() external payable {}
@@ -45,12 +37,12 @@ library DopplerAddrBook {
         return
             DopplerAddrs({
                 poolManager: 0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408,
-                airlock: 0x7E6cF695a8BeA4b2bF94FbB5434a7da3f39A2f8D,
-                tokenFactory: 0xAd62fc9eEbbDC2880c0d4499B0660928d13405cE,
-                dopplerDeployer: 0x7980Be665C8011A413c598F82fa6f95feACa2e1e,
-                governanceFactory: 0xff02a43A90c25941f8c5f4917eaD79EB33C3011C,
-                v4Initializer: 0x511b44b4cC8Cb80223F203E400309b010fEbFAec,
-                migrator: 0x8f4814999D2758ffA69689A37B0ce225C1eEcBFf
+                airlock: 0x3411306Ce66c9469BFF1535BA955503c4Bde1C6e,
+                tokenFactory: 0xc69Ba223c617F7D936B3cf2012aa644815dBE9Ff,
+                dopplerDeployer: 0x4Bf819DfA4066Bd7c9f21eA3dB911Bd8C10Cb3ca,
+                governanceFactory: 0x9dBFaaDC8c0cB2c34bA698DD9426555336992e20,
+                v4Initializer: 0xca2079706A4c2a4a1aA637dFB47d7f27Fe58653F,
+                migrator: 0x04a898f3722c38F9Def707bD17DC78920EFA977C
             });
     }
 
@@ -166,14 +158,6 @@ contract HolographFactoryTest is Test {
         feeRouter = new FeeRouterMock();
         factory = new HolographFactory(address(lzEndpoint), doppler.airlock, address(feeRouter));
         vm.deal(creator, 1 ether);
-
-        bool useV4Stub = vm.envOr("USE_V4_STUB", false);
-        if (useV4Stub) {
-            // patch initializer itself to stub implementation eliminating internal PoolManager logic
-            V4InitializerStub initStub = new V4InitializerStub();
-            vm.etch(doppler.v4Initializer, address(initStub).code);
-            console.log("=== USING V4 STUB MODE ===");
-        }
     }
 
     function test_tokenLaunch_endToEnd() public {
@@ -191,15 +175,16 @@ contract HolographFactoryTest is Test {
         // 2) governanceFactory data
         bytes memory governanceData = abi.encode("DAO", 7200, 50_400, 0);
 
-        // Store current timestamp to ensure mining and deployment use the same values
-        uint256 currentTime = block.timestamp;
+        // Use a fixed timestamp to ensure mining and deployment use the same values
+        // This prevents discrepancies caused by block.timestamp changing between mining and deployment
+        uint256 fixedTime = block.timestamp + 1 hours; // Start auction 1 hour from now
 
         // 12-field blob expected by UniswapV4Initializer & DopplerDeployer
         bytes memory poolInitializerData = abi.encode(
             DEFAULT_MINIMUM_PROCEEDS,
             DEFAULT_MAXIMUM_PROCEEDS,
-            currentTime, // Use stored timestamp
-            currentTime + 3 days, // Use stored timestamp
+            fixedTime, // Use fixed timestamp
+            fixedTime + 3 days, // Use fixed timestamp
             DEFAULT_START_TICK,
             DEFAULT_END_TICK,
             DEFAULT_EPOCH_LENGTH,
@@ -213,48 +198,33 @@ contract HolographFactoryTest is Test {
         uint256 initialSupply = 1e23;
         uint256 numTokensToSell = 1e23;
 
-        // Check if we're using the V4 stub mode
-        bool useV4Stub = vm.envOr("USE_V4_STUB", false);
+        // Mine for a valid salt with proper hook flags
+        DopplerMiner.MineV4Params memory params = DopplerMiner.MineV4Params({
+            airlock: doppler.airlock,
+            poolManager: doppler.poolManager,
+            initialSupply: initialSupply,
+            numTokensToSell: numTokensToSell,
+            numeraire: address(0),
+            tokenFactory: ITokenFactory(doppler.tokenFactory),
+            tokenFactoryData: tokenFactoryData,
+            poolInitializer: IDopplerDeployer(doppler.v4Initializer),
+            poolInitializerData: poolInitializerData
+        });
 
-        bytes32 salt;
-        address hook;
-        address asset;
+        // Use the doppler mineV4 function
+        (bytes32 salt, address hook, address asset) = DopplerMiner.mineV4(params);
 
-        if (useV4Stub) {
-            // In stub mode, we don't need to mine for hook flags since the stub bypasses validation
-            // Use a simple fixed salt
-            salt = bytes32(uint256(1));
-            console.log("=== USING V4 STUB MODE ===");
-            console.log("Using fixed salt: %s", uint256(salt));
-        } else {
-            // In real mode, mine for a valid salt with proper hook flags
-            MineV4Params memory params = MineV4Params({
-                airlock: doppler.airlock,
-                poolManager: doppler.poolManager,
-                initialSupply: initialSupply,
-                numTokensToSell: numTokensToSell,
-                numeraire: address(0),
-                tokenFactory: ITokenFactory(doppler.tokenFactory),
-                tokenFactoryData: tokenFactoryData,
-                poolInitializer: UniswapV4Initializer(doppler.v4Initializer),
-                poolInitializerData: poolInitializerData
-            });
-
-            // Use the doppler mineV4 function
-            (salt, hook, asset) = mineV4(params);
-
-            console.log("=== MINING RESULTS ===");
-            console.log("Mined salt: %s", uint256(salt));
-            console.log("Calculated hook: %s", hook);
-            console.log("Calculated asset: %s", asset);
-        }
+        console.log("=== MINING RESULTS ===");
+        console.log("Mined salt: %s", uint256(salt));
+        console.log("Calculated hook: %s", hook);
+        console.log("Calculated asset: %s", asset);
 
         // 4) assemble CreateParams
         CreateParams memory createParams;
         createParams.initialSupply = DEFAULT_NUM_TOKENS_TO_SELL;
         createParams.numTokensToSell = DEFAULT_NUM_TOKENS_TO_SELL;
         createParams.numeraire = address(0);
-        createParams.tokenFactory = ITokenFactory(doppler.tokenFactory);
+        // createParams.tokenFactory = ITokenFactory(doppler.tokenFactory); // Type conflict - set via assembly
         createParams.tokenFactoryData = tokenFactoryData;
         createParams.governanceFactoryData = governanceData;
         createParams.poolInitializerData = poolInitializerData;
@@ -285,12 +255,17 @@ contract HolographFactoryTest is Test {
         // 0x140: liquidityMigratorData(bytes)        ✓ Set normally
         // 0x160: integrator          (address)       ✓ Set normally
         // 0x180: salt                (bytes32)       ✓ Set normally
+        address tokenFact = doppler.tokenFactory;
         address govFactory = doppler.governanceFactory;
         address poolInit = doppler.v4Initializer;
         address liquidityMig = doppler.migrator;
 
         assembly {
             // mstore(memoryLocation, value) stores 32 bytes at the specified memory location
+
+            // Store tokenFactory at offset 0x60 (96 decimal)
+            // Calculation: 0x60 = 3 fields × 32 bytes = field #4 (tokenFactory)
+            mstore(add(createParams, 0x60), tokenFact)
 
             // Store governanceFactory at offset 0xA0 (160 decimal)
             // Calculation: 0xA0 = 5 fields × 32 bytes = field #6 (governanceFactory)

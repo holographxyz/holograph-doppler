@@ -6,4 +6,4 @@
 	url = https://github.com/OpenZeppelin/openzeppelin-contracts
 [submodule "lib/doppler"]
 	path = lib/doppler
-	url = https://github.com/whetstoneresearch/doppler.git
+	url = https://github.com/whetstoneresearch/doppler
