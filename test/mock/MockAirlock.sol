@@ -99,9 +99,34 @@ contract MockAirlock is IAirlock {
     receive() external payable {}
 
     /**
+     * @notice Create token through factory for testing
+     * @dev Simulates Doppler Airlock calling the HolographFactory
+     */
+    function createTokenThroughFactory(
+        address factory,
+        uint256 initialSupply,
+        address recipient,
+        address owner,
+        bytes32 salt,
+        bytes calldata tokenData
+    ) external returns (address token) {
+        // Call the factory's create function
+        return ITokenFactory(factory).create(initialSupply, recipient, owner, salt, tokenData);
+    }
+    /**
      * @notice Fund contract with tokens for testing
      */
     function fundWithToken(address token, uint256 amount) external {
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
     }
+}
+
+interface ITokenFactory {
+    function create(
+        uint256 initialSupply,
+        address recipient,
+        address owner,
+        bytes32 salt,
+        bytes calldata tokenData
+    ) external returns (address token);
 }

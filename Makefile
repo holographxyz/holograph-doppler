@@ -30,7 +30,7 @@ print-step    = @echo "$(YELLOW)$1$(NC)"
 # ---------------------------------------------------------------------------- #
 #                                   Targets                                   #
 # ---------------------------------------------------------------------------- #
-.PHONY: all help fmt build clean test deploy-base deploy-eth configure-base configure-eth keeper abi
+.PHONY: all help fmt build clean test deploy-base deploy-eth deploy-unichain configure-base configure-eth configure-unichain keeper abi
 
 ## all: Build and test (default target)
 all: build test
@@ -63,7 +63,7 @@ test: build
 	forge test -vvv
 	$(call print-success,Tests)
 
-## deploy-base: Deploy FeeRouter + Factory on Base.
+## deploy-base: Deploy FeeRouter + Factory + Bridge on Base.
 deploy-base:
 	@if [ -z "$(BASE_RPC_URL)" ]; then echo "$(RED)BASE_RPC_URL not set$(NC)"; exit 1; fi
 	@if [ -z "$(BASESCAN_API_KEY)" ]; then echo "$(RED)BASESCAN_API_KEY not set$(NC)"; exit 1; fi
@@ -79,6 +79,14 @@ deploy-eth:
 	forge script script/DeployEthereum.s.sol --rpc-url $(ETHEREUM_RPC_URL) $(FORGE_FLAGS) --verify --etherscan-api-key $(ETHERSCAN_API_KEY)
 	$(call print-success,Ethereum deploy)
 
+## deploy-unichain: Deploy Factory + Bridge on Unichain.
+deploy-unichain:
+	@if [ -z "$(UNICHAIN_RPC_URL)" ]; then echo "$(RED)UNICHAIN_RPC_URL not set$(NC)"; exit 1; fi
+	@if [ -z "$(UNISCAN_API_KEY)" ]; then echo "$(RED)UNISCAN_API_KEY not set$(NC)"; exit 1; fi
+	$(call print-step,Deploying to Unichain…)
+	forge script script/DeployUnichain.s.sol --rpc-url $(UNICHAIN_RPC_URL) $(FORGE_FLAGS) --verify --etherscan-api-key $(UNISCAN_API_KEY)
+	$(call print-success,Unichain deploy)
+
 ## configure-base: Run Configure.s.sol against Base.
 configure-base:
 	@if [ -z "$(BASE_RPC_URL)" ]; then echo "$(RED)BASE_RPC_URL not set$(NC)"; exit 1; fi
@@ -92,6 +100,13 @@ configure-eth:
 	$(call print-step,Configuring Ethereum FeeRouter…)
 	forge script script/Configure.s.sol --rpc-url $(ETHEREUM_RPC_URL) $(FORGE_FLAGS)
 	$(call print-success,Ethereum config)
+
+## configure-unichain: Run Configure.s.sol against Unichain.
+configure-unichain:
+	@if [ -z "$(UNICHAIN_RPC_URL)" ]; then echo "$(RED)UNICHAIN_RPC_URL not set$(NC)"; exit 1; fi
+	$(call print-step,Configuring Unichain Factory + Bridge…)
+	forge script script/Configure.s.sol --rpc-url $(UNICHAIN_RPC_URL) $(FORGE_FLAGS)
+	$(call print-success,Unichain config)
 
 ## keeper: Execute KeeperPullAndBridge on Base.
 keeper:

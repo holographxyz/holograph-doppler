@@ -1,46 +1,43 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity ^0.8.26;
 
 /**
- * @title DeployBase
- * @notice Foundry script to deploy FeeRouter and HolographFactory on Base chain
+ * @title DeployUnichain
+ * @notice Foundry script to deploy HolographFactory and HolographBridge on Unichain
+ * @dev Focuses on Base-Unichain integration for omnichain token expansion
  *
  * Usage examples (from repository root):
  *   // Dry-run against a live fork
- *   forge script script/DeployBase.s.sol \
- *       --fork-url $BASE_RPC
+ *   forge script script/DeployUnichain.s.sol \
+ *       --fork-url $UNICHAIN_RPC
  *
  *   // Broadcast real transactions (requires DEPLOYER_PK)
- *   forge script script/DeployBase.s.sol \
- *       --rpc-url $BASE_RPC \
+ *   forge script script/DeployUnichain.s.sol \
+ *       --rpc-url $UNICHAIN_RPC \
  *       --broadcast \
  *       --private-key $DEPLOYER_PK
  *
- *   // Verify on Etherscan-style explorer (after propagation)
- *   # fee router
- *   forge verify-contract --chain-id 8453 $(cat deployments/base/FeeRouter.txt) src/FeeRouter.sol:FeeRouter $ETHERSCAN_API_KEY
+ *   // Verify on explorer (after propagation)
  *   # factory
- *   forge verify-contract --chain-id 8453 $(cat deployments/base/HolographFactory.txt) src/HolographFactory.sol:HolographFactory $ETHERSCAN_API_KEY
+ *   forge verify-contract --chain-id 1301 $(cat deployments/unichain/HolographFactory.txt) src/HolographFactory.sol:HolographFactory $UNISCAN_API_KEY
  *   # bridge
- *   forge verify-contract --chain-id 8453 $(cat deployments/base/HolographBridge.txt) src/HolographBridge.sol:HolographBridge $ETHERSCAN_API_KEY
+ *   forge verify-contract --chain-id 1301 $(cat deployments/unichain/HolographBridge.txt) src/HolographBridge.sol:HolographBridge $UNISCAN_API_KEY
  */
 
 import "forge-std/Script.sol";
 import "forge-std/console.sol";
-import "../src/FeeRouter.sol";
 import "../src/HolographFactory.sol";
 import "../src/HolographBridge.sol";
 
-contract DeployBase is Script {
+contract DeployUnichain is Script {
     /* -------------------------------------------------------------------------- */
     /*                                Constants                                   */
     /* -------------------------------------------------------------------------- */
-    uint256 internal constant BASE_MAINNET = 8453;
-    uint256 internal constant BASE_SEPOLIA = 84532;
+    uint256 internal constant UNICHAIN_MAINNET = 1301;
+    uint256 internal constant UNICHAIN_SEPOLIA = 1301;  // Update when Unichain Sepolia is available
     
     // LayerZero V2 Endpoint IDs
-    uint32 internal constant BASE_MAINNET_EID = 30184;
-    uint32 internal constant BASE_SEPOLIA_EID = 40245;
+    uint32 internal constant UNICHAIN_MAINNET_EID = 30338;
 
     /* -------------------------------------------------------------------------- */
     /*                                   Run                                      */
@@ -54,19 +51,13 @@ contract DeployBase is Script {
         uint256 deployerPk = shouldBroadcast ? vm.envUint("DEPLOYER_PK") : uint256(0);
 
         address lzEndpoint = vm.envAddress("LZ_ENDPOINT");
-        address dopplerAirlock = vm.envAddress("DOPPLER_AIRLOCK");
-        address treasury = vm.envAddress("TREASURY");
-        uint32 ethEid = uint32(vm.envUint("ETH_EID"));
 
         // Quick sanity checks
         require(lzEndpoint != address(0), "LZ_ENDPOINT not set");
-        require(dopplerAirlock != address(0), "DOPPLER_AIRLOCK not set");
-        require(treasury != address(0), "TREASURY not set");
-        require(ethEid != 0, "ETH_EID not set");
 
         /* ----------------------------- Chain guard ---------------------------- */
-        if (block.chainid != BASE_MAINNET && block.chainid != BASE_SEPOLIA) {
-            console.log("[WARNING] Chain ID does not match known Base chains");
+        if (block.chainid != UNICHAIN_MAINNET && block.chainid != UNICHAIN_SEPOLIA) {
+            console.log("[WARNING] Chain ID does not match known Unichain chains");
         }
 
         console.log("Deploying to chainId", block.chainid);
@@ -79,44 +70,27 @@ contract DeployBase is Script {
         }
 
         uint256 gasStart = gasleft();
-        // Deploy FeeRouter – on Base chain we pass zero addresses for Ethereum-specific params
-        FeeRouter feeRouter = new FeeRouter(
-            lzEndpoint,
-            ethEid,
-            address(0), // stakingRewards (none on Base)
-            address(0), // HLG token (none on Base)
-            address(0), // WETH (unused on Base for this contract)
-            address(0), // SwapRouter (unused)
-            treasury
-        );
-        uint256 gasFeeRouter = gasStart - gasleft();
-
-        gasStart = gasleft();
         // Deploy HolographFactory with LayerZero endpoint
         HolographFactory factory = new HolographFactory(lzEndpoint);
         uint256 gasFactory = gasStart - gasleft();
 
         gasStart = gasleft();
         // Deploy HolographBridge for cross-chain token expansion
-        uint32 baseEid = block.chainid == BASE_MAINNET ? BASE_MAINNET_EID : BASE_SEPOLIA_EID;
-        HolographBridge bridge = new HolographBridge(lzEndpoint, address(factory), baseEid);
+        HolographBridge bridge = new HolographBridge(lzEndpoint, address(factory), UNICHAIN_MAINNET_EID);
         uint256 gasBridge = gasStart - gasleft();
 
         vm.stopBroadcast();
 
         console.log("---------------- Deployment Complete ----------------");
-        console.log("FeeRouter deployed at:", address(feeRouter));
-        console.log("Gas used:", gasFeeRouter);
         console.log("HolographFactory deployed at:", address(factory));
         console.log("Gas used:", gasFactory);
         console.log("HolographBridge deployed at:", address(bridge));
         console.log("Gas used:", gasBridge);
 
         /* ----------------------- Persist addresses locally -------------------- */
-        // Creates simple text files with addresses under deployments/base/
-        string memory dir = "deployments/base";
+        // Creates simple text files with addresses under deployments/unichain/
+        string memory dir = "deployments/unichain";
         vm.createDir(dir, true);
-        vm.writeFile(string.concat(dir, "/FeeRouter.txt"), vm.toString(address(feeRouter)));
         vm.writeFile(string.concat(dir, "/HolographFactory.txt"), vm.toString(address(factory)));
         vm.writeFile(string.concat(dir, "/HolographBridge.txt"), vm.toString(address(bridge)));
     }

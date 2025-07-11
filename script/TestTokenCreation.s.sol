@@ -81,7 +81,9 @@ contract TestTokenCreation is Script {
 
         vm.startPrank(testAccount);
 
-        try factory.createToken(params) returns (address asset) {
+        // NOTE: This script needs updating for new ITokenFactory interface
+        // try factory.createToken(params) returns (address asset) {
+        try factory.create(0, address(0), address(0), bytes32(0), "") returns (address asset) {
             console.log("Token created successfully at:", asset);
         } catch Error(string memory reason) {
             console.log("Error:", reason);
