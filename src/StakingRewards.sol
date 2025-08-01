@@ -2,32 +2,9 @@
 pragma solidity ^0.8.24;
 
 /**
- * ----------------------------------------------------------------------------
- * @title StakingRewards – Holograph 2.0
- * ----------------------------------------------------------------------------
- * @notice   Single-token staking contract for HLG that distributes rewards
- *           deposited by the FeeRouter. Users may stake/withdraw at any
- *           time, subject to an optional cooldown period, and claim their
- *           accrued rewards. Reward distribution follows a standard
- *           reward-per-token model.
- *
- * Mechanics
- * ---------
- * • Stake    – User deposits HLG → increases their stake + updates rewards
- * • Withdraw – User removes a portion/all of their stake; guarded by an
- *              optional cooldown (default 7 days)
- * • Claim    – User collects their accumulated HLG rewards
- * • addRewards – Called by FeeRouter when fresh HLG fees arrive; reward
- *                is distributed pro-rata to all stakers instantly
- * • Owner    – May pause/unpause, change cooldown length, set a new
- *              FeeRouter, or recover non-HLG tokens
- *
- * Safety
- * ------
- * • Custom errors used over string reverts
- * • OpenZeppelin Ownable, Pausable, ReentrancyGuard
- * • Funds stored are ERC-20 only; no ETH held
- * ----------------------------------------------------------------------------
+ * @title StakingRewards
+ * @notice Simplified HLG staking contract with auto-compounding rewards
+ * @dev Supports both manual bootstrap operations and future automated FeeRouter integration
  */
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -39,215 +16,275 @@ contract StakingRewards is Ownable, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     /* -------------------------------------------------------------------------- */
-    /*                                Custom Errors                               */
+    /*                                  Errors                                    */
     /* -------------------------------------------------------------------------- */
-    error ZeroAmount(); // parameter is zero
-    error CooldownActive(uint256 remaining); // stake still cooling down
-    error FeeRouterOnly(); // caller ≠ feeRouter
-    error ZeroAddress(); // address(0)
-    error ExceedsBalance(); // withdraw > staked
-    error RecoverHLG(); // attempted to recover the stake token
+    error ZeroAmount();
+    error ZeroAddress();
+    error NoStake();
+    error InsufficientBalance();
+    error Unauthorized();
+    error CannotRecoverStakeToken();
+    error NoEtherAccepted();
+    error InvalidCall();
 
     /* -------------------------------------------------------------------------- */
-    /*                             Immutable & Storage                            */
+    /*                                 Storage                                    */
     /* -------------------------------------------------------------------------- */
-    /// @notice The HLG ERC‑20 token that users stake and that rewards are paid in.
+
+    /// @notice HLG token that users stake and receive as rewards
     IERC20 public immutable HLG;
 
-    /// @notice Address of the FeeRouter that is authorized to call
-    ///         {addRewards}.
-    address public feeRouter;
-
-    /// @notice Cooldown (in seconds) required between last stake and withdraw.
-    uint256 public cooldownPeriod = 7 days; // 0 ⇒ disabled
-
-    /// @notice Total HLG currently staked in the contract.
+    /// @notice Total HLG staked in the contract
     uint256 public totalStaked;
 
-    /// @dev User → HLG staked balance.
+    /// @notice User stake balances
     mapping(address => uint256) public balanceOf;
 
-    // ---------- reward-per-token accounting ----------
-    uint256 public rewardPerTokenStored; // scaled by 1e18
-    mapping(address => uint256) public userRewardPerTokenPaid;
-    mapping(address => uint256) public rewards; // accrued, unclaimed
-    // --------------------------------------------------
+    /// @notice FeeRouter address (future automated rewards source)
+    address public feeRouter;
 
-    /// @dev Timestamp of the last stake for cooldown checks.
-    mapping(address => uint256) public lastStakeTimestamp;
+    /// @notice Array of all stakers for reward distribution
+    address[] public stakers;
+
+    /// @notice Track if address is a staker
+    mapping(address => bool) public isStaker;
 
     /* -------------------------------------------------------------------------- */
-    /*                                   Events                                   */
+    /*                                  Events                                    */
     /* -------------------------------------------------------------------------- */
     event Staked(address indexed user, uint256 amount);
     event Unstaked(address indexed user, uint256 amount);
-    event RewardPaid(address indexed user, uint256 amount);
-    event RewardAdded(uint256 amount);
-    event CooldownUpdated(uint256 seconds_);
-    event FeeRouterUpdated(address feeRouter);
+    event RewardsDistributed(uint256 totalAmount, uint256 burnAmount, uint256 rewardAmount);
+    event FeeRouterUpdated(address indexed newFeeRouter);
+    event TokensRecovered(address indexed token, uint256 amount, address indexed to);
 
     /* -------------------------------------------------------------------------- */
-    /*                                 Constructor                                */
+    /*                               Constructor                                  */
     /* -------------------------------------------------------------------------- */
-    /**
-     * @param _hlg        Address of the immutable HLG token
-     * @param _feeRouter  Initial FeeRouter address authorized to call addRewards
-     */
-    constructor(address _hlg, address _feeRouter) Ownable(msg.sender) {
-        if (_hlg == address(0) || _feeRouter == address(0)) revert ZeroAddress();
+    constructor(address _hlg, address _owner) Ownable(_owner) {
+        if (_hlg == address(0)) revert ZeroAddress();
         HLG = IERC20(_hlg);
-        feeRouter = _feeRouter;
-        _pause(); // begin paused until admin enables
+        _pause(); // Start paused until ready
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                    Modifier – updates user reward accounting              */
+    /*                              User Functions                                */
     /* -------------------------------------------------------------------------- */
-    modifier updateReward(address account) {
-        // Credit pending rewards before mutating balances
-        if (account != address(0)) {
-            rewards[account] += _earned(account);
-            userRewardPerTokenPaid[account] = rewardPerTokenStored;
-        }
-        _;
-    }
 
-    /* -------------------------------------------------------------------------- */
-    /*                               User Functions                               */
-    /* -------------------------------------------------------------------------- */
     /**
-     * @notice Stake `amount` HLG
-     * @param amount Quantity to stake
+     * @notice Stake HLG tokens
+     * @param amount Amount of HLG to stake
      */
-    function stake(uint256 amount) external nonReentrant whenNotPaused updateReward(msg.sender) {
+    function stake(uint256 amount) external nonReentrant whenNotPaused {
         if (amount == 0) revert ZeroAmount();
-        totalStaked += amount;
+
+        // Add to stakers array if first time staking
+        if (!isStaker[msg.sender] && balanceOf[msg.sender] == 0) {
+            stakers.push(msg.sender);
+            isStaker[msg.sender] = true;
+        }
+
         balanceOf[msg.sender] += amount;
-        lastStakeTimestamp[msg.sender] = block.timestamp;
+        totalStaked += amount;
+
         HLG.safeTransferFrom(msg.sender, address(this), amount);
         emit Staked(msg.sender, amount);
     }
 
     /**
-     * @notice Withdraw `amount` HLG after cooldown
-     * @param amount Quantity to withdraw
+     * @notice Unstake entire HLG balance including accumulated rewards
+     * @dev Users must unstake their full balance, no partial unstaking
      */
-    function withdraw(uint256 amount) public nonReentrant updateReward(msg.sender) {
-        if (amount == 0) revert ZeroAmount();
-        uint256 staked = balanceOf[msg.sender];
-        if (staked < amount) revert ExceedsBalance();
+    function unstake() external nonReentrant {
+        uint256 userBalance = balanceOf[msg.sender];
+        if (userBalance == 0) revert NoStake();
 
-        // cooldown enforcement (if enabled)
-        if (cooldownPeriod != 0) {
-            uint256 unlockTime = lastStakeTimestamp[msg.sender] + cooldownPeriod;
-            if (block.timestamp < unlockTime) revert CooldownActive(unlockTime - block.timestamp);
-        }
+        balanceOf[msg.sender] = 0;
+        totalStaked -= userBalance;
 
-        totalStaked -= amount;
-        balanceOf[msg.sender] = staked - amount;
-        HLG.safeTransfer(msg.sender, amount);
-        emit Unstaked(msg.sender, amount);
-    }
-
-    /**
-     * @notice Claim any accumulated HLG rewards
-     */
-    function claim() public nonReentrant updateReward(msg.sender) {
-        uint256 reward = rewards[msg.sender];
-        if (reward > 0) {
-            rewards[msg.sender] = 0;
-            HLG.safeTransfer(msg.sender, reward);
-            emit RewardPaid(msg.sender, reward);
-        }
-    }
-
-    /**
-     * @notice Convenience: withdraw all stake and claim rewards in one tx
-     */
-    function exit() external {
-        withdraw(balanceOf[msg.sender]);
-        claim();
+        HLG.safeTransfer(msg.sender, userBalance);
+        emit Unstaked(msg.sender, userBalance);
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                            FeeRouter Interaction                           */
+    /*                           Bootstrap Operations                             */
     /* -------------------------------------------------------------------------- */
+
     /**
-     * @notice Called by the FeeRouter when HLG protocol fees are sent here
-     * @dev    Distributes the reward immediately by updating rewardPerTokenStored
-     * @param  amount Amount of HLG transferred from the FeeRouter
+     * @notice Deposit HLG and distribute: 50% burn, 50% rewards
+     * @dev Used for manual bootstrap operations
+     * @param hlgAmount Total HLG to process
      */
-    function addRewards(uint256 amount) external nonReentrant updateReward(address(0)) {
-        if (msg.sender != feeRouter) revert FeeRouterOnly();
+    function depositAndDistribute(uint256 hlgAmount) external onlyOwner nonReentrant {
+        if (hlgAmount == 0) revert ZeroAmount();
+
+        // Transfer HLG from caller
+        HLG.safeTransferFrom(msg.sender, address(this), hlgAmount);
+
+        // Calculate 50/50 split
+        uint256 burnAmount = hlgAmount / 2;
+        uint256 rewardAmount = hlgAmount - burnAmount;
+
+        // Burn 50% by sending to address(0)
+        HLG.safeTransfer(address(0), burnAmount);
+
+        // Distribute the remaining 50% proportionally to all stakers
+        if (totalStaked > 0) {
+            _distributeRewards(rewardAmount);
+        }
+        // If no stakers, rewards just accumulate in contract for future stakers
+
+        emit RewardsDistributed(hlgAmount, burnAmount, rewardAmount);
+    }
+
+    /* -------------------------------------------------------------------------- */
+    /*                      Future Automated Integration                          */
+    /* -------------------------------------------------------------------------- */
+
+    /**
+     * @notice Add rewards from FeeRouter (future automated flow)
+     * @dev FeeRouter will call this to add rewards directly
+     * @param amount Amount of HLG rewards to add
+     */
+    function addRewards(uint256 amount) external nonReentrant {
+        if (msg.sender != feeRouter) revert Unauthorized();
         if (amount == 0) revert ZeroAmount();
+
+        // Transfer rewards from FeeRouter
         HLG.safeTransferFrom(msg.sender, address(this), amount);
 
+        // Calculate 50/50 split
+        uint256 burnAmount = amount / 2;
+        uint256 rewardAmount = amount - burnAmount;
+
+        // Burn 50%
+        HLG.safeTransfer(address(0), burnAmount);
+
+        // Distribute the remaining 50% proportionally to all stakers
         if (totalStaked > 0) {
-            rewardPerTokenStored += (amount * 1e18) / totalStaked;
+            _distributeRewards(rewardAmount);
         }
-        emit RewardAdded(amount);
+        // If no stakers, rewards just accumulate in contract for future stakers
+
+        emit RewardsDistributed(amount, burnAmount, rewardAmount);
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                                View Helpers                                */
+    /*                            Internal Functions                              */
     /* -------------------------------------------------------------------------- */
-    /**
-     * @notice Calculate the pending HLG reward for a user
-     * @param account The address of the user
-     * @return The pending HLG reward for the user
-     */
-    function earned(address account) external view returns (uint256) {
-        return _earned(account) + rewards[account];
-    }
 
     /**
-     * @dev Internal view function to calculate the pending HLG reward for a user
-     * @param account The address of the user
-     * @return The pending HLG reward for the user
+     * @notice Distribute rewards proportionally to all stakers
+     * @dev Increases each staker's balance by their proportional share
+     * @param rewardAmount Total rewards to distribute
      */
-    function _earned(address account) internal view returns (uint256) {
-        return (balanceOf[account] * (rewardPerTokenStored - userRewardPerTokenPaid[account])) / 1e18;
+    function _distributeRewards(uint256 rewardAmount) internal {
+        uint256 stakersLength = stakers.length;
+        if (stakersLength == 0 || totalStaked == 0) return;
+
+        // Calculate and distribute rewards to each staker
+        for (uint256 i = 0; i < stakersLength; i++) {
+            address staker = stakers[i];
+            uint256 stakerBalance = balanceOf[staker];
+
+            if (stakerBalance > 0) {
+                // Calculate proportional reward: (userStake / totalStake) * rewardAmount
+                uint256 stakerReward = (stakerBalance * rewardAmount) / totalStaked;
+
+                // Add reward to staker's balance
+                balanceOf[staker] += stakerReward;
+            }
+        }
+
+        // Update totalStaked to include distributed rewards
+        totalStaked += rewardAmount;
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                              Admin Functions                              */
+    /*                              View Functions                                */
     /* -------------------------------------------------------------------------- */
+
     /**
-     * @notice Update the cooldown length (set to 0 to disable)
+     * @notice Get user's share of total staked
+     * @param user Address to check
+     * @return User's percentage share (basis points)
      */
-    function setCooldown(uint256 seconds_) external onlyOwner {
-        cooldownPeriod = seconds_;
-        emit CooldownUpdated(seconds_);
+    function getUserShare(address user) external view returns (uint256) {
+        if (totalStaked == 0) return 0;
+        return (balanceOf[user] * 10000) / totalStaked;
     }
 
     /**
-     * @notice Change the authorized FeeRouter
+     * @notice Get total rewards in contract (excluding staked amounts)
+     * @return Total reward balance
      */
-    function setFeeRouter(address _router) external onlyOwner {
-        if (_router == address(0)) revert ZeroAddress();
-        feeRouter = _router;
-        emit FeeRouterUpdated(_router);
+    function getTotalRewards() external view returns (uint256) {
+        uint256 totalBalance = HLG.balanceOf(address(this));
+        return totalBalance > totalStaked ? totalBalance - totalStaked : 0;
     }
 
     /**
-     * @notice Pause the staking & withdrawing
+     * @notice Get total number of stakers
+     * @return Number of unique stakers
+     */
+    function getStakersCount() external view returns (uint256) {
+        return stakers.length;
+    }
+
+    /* -------------------------------------------------------------------------- */
+    /*                              Admin Functions                               */
+    /* -------------------------------------------------------------------------- */
+
+    /**
+     * @notice Set FeeRouter address for future automation
+     * @param _feeRouter New FeeRouter address
+     */
+    function setFeeRouter(address _feeRouter) external onlyOwner {
+        if (_feeRouter == address(0)) revert ZeroAddress();
+        feeRouter = _feeRouter;
+        emit FeeRouterUpdated(_feeRouter);
+    }
+
+    /**
+     * @notice Pause staking operations
      */
     function pause() external onlyOwner {
         _pause();
     }
 
     /**
-     * @notice Unpause the staking & withdrawing
+     * @notice Unpause staking operations
      */
     function unpause() external onlyOwner {
         _unpause();
     }
 
     /**
-     * @notice Recover tokens sent here by mistake (anything except the stake token itself)
+     * @notice Emergency function to recover tokens (not HLG)
+     * @dev Useful if someone accidentally sends wrong tokens to this contract
+     * @param token Token address to recover
+     * @param amount Amount to recover
+     * @param to Address to send recovered tokens to
      */
-    function recoverToken(address token, uint256 amount) external onlyOwner {
-        if (token == address(HLG)) revert RecoverHLG();
-        IERC20(token).safeTransfer(owner(), amount);
+    function recoverToken(address token, uint256 amount, address to) external onlyOwner {
+        if (token == address(HLG)) revert CannotRecoverStakeToken();
+        if (to == address(0)) revert ZeroAddress();
+
+        IERC20(token).safeTransfer(to, amount);
+        emit TokensRecovered(token, amount, to);
+    }
+
+    /* -------------------------------------------------------------------------- */
+    /*                            Fallback Functions                              */
+    /* -------------------------------------------------------------------------- */
+
+    /// @notice Reject direct ETH transfers
+    receive() external payable {
+        revert NoEtherAccepted();
+    }
+
+    /// @notice Reject fallback calls
+    fallback() external payable {
+        revert InvalidCall();
     }
 }
