@@ -54,15 +54,6 @@ contract StakingRewardsInvariants is StdInvariant, Test {
 
         assertGe(currentIndex, lastIndex, "Invariant violated: globalRewardIndex decreased");
     }
-
-    /// @notice Unallocated buffer should be zero when there are stakers
-    function invariant_unallocatedBufferZeroWithStakers() public view {
-        if (stakingRewards.totalStaked() > 0) {
-            assertEq(
-                stakingRewards.unallocatedBuffer(), 0, "Invariant violated: unallocatedBuffer > 0 with stakers present"
-            );
-        }
-    }
 }
 
 /// @title StakingRewardsHandler

@@ -140,7 +140,7 @@ contract ProcessReferralCSV is Script {
         ReferralData[] memory referrals
     ) internal {
         address deployer = vm.addr(deployerKey);
-        StakingRewards stakingRewards = StakingRewards(stakingRewardsAddress);
+        StakingRewards stakingRewards = StakingRewards(payable(stakingRewardsAddress));
         IERC20 hlg = IERC20(hlgAddress);
 
         console.log("\n== BATCH STAKING EXECUTION ==");
@@ -208,7 +208,13 @@ contract ProcessReferralCSV is Script {
         console.log("\n== VERIFICATION ==");
         for (uint256 i = 0; i < 3 && i < referrals.length; i++) {
             uint256 balance = stakingRewards.balanceOf(referrals[i].user);
-            console.log("User", vm.toString(referrals[i].user), "balance:", balance / 1e18, "HLG");
+            console.log(
+                string(
+                    abi.encodePacked(
+                        "User ", vm.toString(referrals[i].user), " balance: ", vm.toString(balance / 1e18), " HLG"
+                    )
+                )
+            );
         }
     }
 }

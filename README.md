@@ -254,8 +254,17 @@ Single-token HLG staking with configurable burn/reward distribution, emergency c
 function stake(uint256 amount) external; // Stake HLG tokens
 function unstake() external; // Withdraw full balance (auto-compounded rewards)
 function setBurnPercentage(uint256 _burnPercentage) external; // Owner only
-function addRewards(uint256 amount) external; // FeeRouter only
+function depositAndDistribute(uint256 hlgAmount) external; // Owner only, manual funding
+function addRewards(uint256 amount) external; // FeeRouter only, automated funding
 function batchStakeFor(address[] calldata users, uint256[] calldata amounts, uint256 startIndex, uint256 endIndex) external; // Owner only, batch referral rewards
+
+// Extra token management
+function getExtraTokens() external view returns (uint256); // View extra HLG available for recovery
+function recoverExtraHLG(address to, uint256 amount) external; // Owner only, recover extra HLG tokens
+
+// Distributor System (for future campaigns)
+function setDistributor(address distributor, bool status) external; // Owner only, whitelist campaign distributors
+function stakeFromDistributor(address user, uint256 amount) external; // Distributor only, credit stakes with automatic token pull
 ```
 
 ## Token Launch Process
@@ -612,6 +621,45 @@ forge script script/FeeOperations.s.sol --sig "emergencyRedirect(address)" $EMER
 
 # Check FeeRouter ETH balance
 cast balance $FEE_ROUTER --rpc-url $BASE_RPC
+```
+
+### Future Campaign System
+
+The StakingRewards contract includes a **distributor system** for future campaigns without requiring pauses or owner gas costs:
+
+**Distributor Benefits**:
+- **User-pays-gas**: Claimants pay their own gas, not the treasury
+- **No pause required**: Works while the pool is live 24/7
+- **Multiple campaigns**: Deploy separate distributors for each campaign
+- **Unclaimed recovery**: Distributors can recover unclaimed tokens
+- **Flexible mechanics**: Supports Merkle drops, quests, bug bounties, etc.
+
+**Campaign Flow**:
+```solidity
+// 1. Deploy campaign distributor (e.g., MerkleDistributor)
+MerkleDistributor distributor = new MerkleDistributor(
+    hlg, stakingRewards, merkleRoot, allocation, duration, owner
+);
+
+// 2. Whitelist distributor in StakingRewards
+stakingRewards.setDistributor(address(distributor), true);
+
+// 3. Fund distributor with HLG budget
+hlg.transfer(address(distributor), totalAllocation);
+
+// 4. Users claim via distributor (gas paid by user)
+distributor.claim(amount, merkleProof); // Automatically stakes in StakingRewards
+```
+
+**Example Use Cases**:
+- **Merkle Airdrops**: Users claim with proofs, tokens auto-stake
+- **Trading Quests**: Complete tasks, claim rewards that auto-stake  
+- **Bug Bounties**: Submit reports, receive staked HLG rewards
+- **Liquidity Mining**: Provide liquidity, claim periodic staked rewards
+
+**Deploy Campaign Distributor**:
+```bash
+make deploy-merkle-distributor  # Example Merkle campaign deployment
 
 # Check if Airlock is whitelisted
 cast call $FEE_ROUTER "trustedAirlocks(address)" $AIRLOCK_ADDRESS --rpc-url $BASE_RPC

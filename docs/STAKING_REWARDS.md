@@ -11,7 +11,7 @@ The contract implements a configurable burn/reward split: when HLG tokens are re
 - **Auto-Compounding**: Rewards automatically increase stake balances without claiming
 - **O(1) Gas Efficiency**: Constant gas costs regardless of user count
 - **Configurable Tokenomics**: Every HLG token is split between burning (deflationary) and rewards based on owner-configurable percentage
-- **Genesis Bonus System**: First stakers receive accumulated rewards from zero-staker periods
+- **Extra Token Recovery**: Recovers HLG tokens sent directly to contract outside funding operations
 - **Dual Operational Flows**: Supports both bootstrap manual operations and automated integration
 - **Security Features**: Reentrancy protection, emergency functions, and access controls
 
@@ -22,7 +22,7 @@ The contract implements a configurable burn/reward split: when HLG tokens are re
 1. [Economic Model](#economic-model)
 2. [MasterChef V2 Algorithm](#masterchef-v2-algorithm)
 3. [Dual Operational Flows](#dual-operational-flows)
-4. [Genesis Bonus (Zero-Staker Buffer)](#genesis-bonus-zero-staker-buffer)
+4. [Stray Token Handling](#stray-token-handling)
 5. [User Journey & State Transitions](#user-journey--state-transitions)
 6. [Security Features](#security-features)
 7. [Technical Implementation](#technical-implementation)
@@ -193,59 +193,44 @@ The contract supports both flows simultaneously, so we can gradually move from m
 
 ---
 
-## Genesis Bonus (Zero-Staker Buffer)
+## Extra Token Recovery
 
 ### The Problem
 
-When rewards arrive but no users are staking, other contracts either waste those rewards or get really complicated trying to handle them. The mathematical issue is straightforward: you cannot divide by zero when `totalStaked = 0`.
+When HLG tokens arrive through unexpected means (accidental transfers, leftover rewards from previous operations), traditional contracts either ignore them or require complex recovery mechanisms. The StakingRewards contract provides a clean recovery system for these "extra" tokens.
 
-### The Solution: Genesis Bonus
+### The Solution: Virtual Compounding with Recovery
 
-The contract implements an unallocated buffer that accumulates rewards when no stakers are present, then distributes all buffered rewards to the first staker as a "genesis bonus."
+The contract uses a virtual compounding model that immediately tracks rewards upon distribution. Extra tokens that arrive outside normal funding operations can be safely recovered by the owner without affecting user rewards.
 
 ```solidity
-uint256 public unallocatedBuffer;  // Accumulated rewards when totalStaked == 0
+uint256 public unallocatedRewards;  // Rewards distributed but not yet claimed by users
 ```
 
-### Buffer Accumulation
+### Extra Token Detection
+
+The contract can identify extra tokens by comparing its HLG balance to the amount needed for user stakes:
 
 ```solidity
-function _addRewards(uint256 rewardAmount) internal {
-    if (totalStaked == 0) {
-        // No stakers - accumulate in buffer
-        unallocatedBuffer += rewardAmount;
-        return;
-    }
-    // Normal distribution to existing stakers
-    globalRewardIndex += (rewardAmount * INDEX_PRECISION) / totalStaked;
+function getExtraTokens() external view returns (uint256) {
+    uint256 contractBalance = HLG.balanceOf(address(this));
+    return contractBalance > totalStaked ? contractBalance - totalStaked : 0;
+}
+
+function recoverExtraHLG(address to, uint256 amount) external onlyOwner {
+    // Only recover tokens beyond what's needed for user stakes
+    uint256 available = getExtraTokens();
+    if (amount > available) revert NotEnoughExtraTokens();
+    HLG.safeTransfer(to, amount);
 }
 ```
 
-### Genesis Bonus Distribution
+### Key Benefits
 
-```solidity
-function stake(uint256 amount) external {
-    // ... stake logic ...
-
-    // If first staker and we have buffered rewards
-    if (isFirstStaker && unallocatedBuffer > 0) {
-        uint256 bufferedRewards = unallocatedBuffer;
-        unallocatedBuffer = 0;
-
-        // Give all buffered rewards to first staker as genesis bonus
-        balanceOf[msg.sender] += bufferedRewards;
-        totalStaked += bufferedRewards;
-
-        emit RewardsCompounded(msg.sender, bufferedRewards);
-    }
-}
-```
-
-### Economic Benefits
-
-- **Early Adopter Incentive**: First stakers receive bonus rewards for bootstrapping the pool
-- **Zero Waste**: All rewards are distributed, maintaining tokenomics integrity
-- **Simple Logic**: No complicated delayed rewards or extra state tracking
+- **Safe Recovery**: Only allows recovery of truly extra tokens, never affects user stakes
+- **Clear Accounting**: Easy to see exactly how much can be safely recovered
+- **Owner Control**: Only contract owner can initiate recovery operations
+- **No-Op Safety**: When no stakers exist, funding becomes a no-op to prevent unnecessary gas costs
 
 ---
 
@@ -339,6 +324,9 @@ emergencyExit();  // Get out fast if needed
 ```solidity
 recoverToken(address token, address to, uint256 minimum);
 // Sweeps full balance of any token except HLG
+
+recoverExtraHLG(address to, uint256 amount);
+// Safely recovers extra HLG tokens beyond user stakes
 ```
 
 **ETH sweep** (protection against selfdestruct attacks):
@@ -370,13 +358,14 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
     uint256 public totalStaked;
     mapping(address => uint256) public balanceOf;
 
-    // MasterChef state
+    // Virtual compounding state
     uint256 public globalRewardIndex;
     mapping(address => uint256) public userIndexSnapshot;
-    uint256 public unallocatedBuffer;
+    uint256 public unallocatedRewards;
 
     // Config
     address public feeRouter;
+    uint256 public burnPercentage;
 }
 ```
 
@@ -478,17 +467,18 @@ addRewards(120 ether);  // 120 HLG tokens
 // Bob gets: 200/300 * 60 = 40 HLG tokens
 ```
 
-### Zero-Staker Buffer
+### Extra Token Recovery
 
 ```solidity
-// HLG rewards arrive with no stakers
-addRewards(100 ether);  // 100 HLG: X% burned, (100-X)% buffered
-addRewards(100 ether);  // 100 HLG: X% burned, (100-X)% buffered
-// unallocatedBuffer = 100 HLG tokens
+// Someone accidentally sends HLG to the contract
+HLG.transfer(stakingContract, 50 ether);  // 50 extra HLG tokens
 
-// First person stakes
-stake(100 ether);  // Stakes 100 HLG
-// Gets 100 HLG (stake) + 100 HLG (buffer) = 200 HLG total
+// Owner can recover the extra tokens safely
+uint256 available = stakingRewards.getExtraTokens();  // Returns 50 ether
+stakingRewards.recoverExtraHLG(treasury, 50 ether);  // Recover to treasury
+
+// No stakers scenario - funding becomes no-op
+depositAndDistribute(100 ether);  // totalStaked == 0, returns early, no gas wasted
 ```
 
 ### Emergency Scenarios
@@ -540,11 +530,13 @@ constructor(address _hlg, address _owner) {
 // Critical invariant (must always be true)
 totalStaked == sum(all user balances)
 
-// Buffer state
-if (totalStaked > 0) then unallocatedBuffer == 0
-
 // Solvency check
 HLG.balanceOf(contract) >= totalStaked
+
+// Extra tokens tracking (operational metric)
+extraTokens = HLG.balanceOf(contract) - totalStaked
+// Check for extra tokens available for recovery
+uint256 extraTokens = stakingRewards.getExtraTokens();
 ```
 
 **Emergency Procedures:**

@@ -206,4 +206,10 @@ abi: build
 gas-analysis:
 	$(call print-step,Analyzing gas costs for referral campaign…)
 	forge script script/GasAnalysis.s.sol:GasAnalysis --fork-url https://ethereum-rpc.publicnode.com -vv
-	$(call print-success,Gas analysis) 
+	$(call print-success,Gas analysis)
+
+## deploy-merkle-distributor: Deploy MerkleDistributor for future campaigns.
+deploy-merkle-distributor:
+	$(call print-step,Deploying MerkleDistributor for campaign…)
+	forge script script/DeployMerkleDistributor.s.sol:DeployMerkleDistributor --fork-url $(ETHEREUM_RPC_URL) $(BROADCAST_FLAG) --verify
+	$(call print-success,MerkleDistributor deployment) 

@@ -2,23 +2,16 @@
 pragma solidity ^0.8.24;
 
 /**
- * @title StakingRewards - Auto-Compounding HLG Staking Contract
- * @notice Users stake HLG tokens and rewards automatically compound into their balance
- * @dev Uses MasterChef algorithm for O(1) reward distribution with auto-compounding
- *
- * KEY FEATURES:
- * - Stake HLG tokens to earn proportional rewards
- * - Rewards automatically compound (increase your stake balance)
- * - No separate claiming - must fully unstake to access rewards
- * - ALL incoming tokens are split according to configurable burn percentage (default 50% burn, 50% rewards)
- * - Works for both bootstrap (depositAndDistribute) and automated (addRewards) flows
- *
- * MASTERCHEF ALGORITHM:
- * - Global reward rate tracks cumulative rewards per token
- * - User debt tracks how much of the global rate they've already received
- * - When rewards are added: global rate increases
- * - When user interacts: pending rewards = (balance * (global_rate - user_debt)) / INDEX_PRECISION
- * - Pending rewards are added to user's balance (auto-compounding)
+ * @title StakingRewards
+ * @notice HLG staking with automatic reward compounding and configurable burn/reward split.
+ * @dev
+ * - Rewards automatically compound using a reward tracking system with high precision math.
+ * - When paused, users can still withdraw but cannot stake; reward distributors are also blocked.
+ * - When rewards are distributed, they're immediately tracked for all stakers proportionally.
+ * - Extra HLG tokens sent directly to the contract can be recovered with `recoverExtraHLG`.
+ * - If no one is staking, reward distributions are skipped to save gas.
+ * - Token burning works by transferring to address(0). The HLG token at
+ *   0x740dF024Ce73F589AcD5E8756B377eF8C6558BaB reduces its total supply when tokens are burned.
  */
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -35,7 +28,6 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
     error ZeroAmount();
     error ZeroAddress();
     error NoStake();
-    error InsufficientBalance();
     error Unauthorized();
     error CannotRecoverStakeToken();
     error NoEtherAccepted();
@@ -47,56 +39,50 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
     error ArrayLengthMismatch();
     error EndIndexOutOfBounds();
     error InvalidIndexRange();
+    error NoTokensReceived();
+    error NotWhitelistedDistributor();
+    error BurnFailed();
+    error NotEnoughExtraTokens();
+    error NotEnoughRewardsAvailable();
+    error ActiveStakeExists();
+    error RewardTooSmall();
 
     /* -------------------------------------------------------------------------- */
-    /*                                Constants                                    */
+    /*                                  Storage                                   */
     /* -------------------------------------------------------------------------- */
 
-    /// @notice Precision multiplier for reward calculations (MasterChef standard)
+    /// @notice Precision multiplier for reward calculations (1e12 scaling)
     uint256 private constant INDEX_PRECISION = 1e12;
 
     /// @notice Maximum percentage value in basis points (100%)
     uint256 public constant MAX_PERCENTAGE = 10000;
 
-    /* -------------------------------------------------------------------------- */
-    /*                                 Storage                                    */
-    /* -------------------------------------------------------------------------- */
-
     /// @notice HLG token that users stake and receive as rewards
     IERC20 public immutable HLG;
 
     /// @notice Total HLG staked in the contract (includes compounded rewards)
-    /// @dev This grows as rewards are distributed and auto-compound
     uint256 public totalStaked;
 
     /// @notice User stake balances (includes original stake + compounded rewards)
-    /// @dev This automatically increases as rewards compound
     mapping(address => uint256) public balanceOf;
 
     /// @notice FeeRouter address (future automated rewards source)
     address public feeRouter;
 
     /// @notice Percentage of rewards that get burned (in basis points, 10000 = 100%)
-    /// @dev Default is 5000 (50%), can be changed by owner
     uint256 public burnPercentage;
 
-    /* -------------------------------------------------------------------------- */
-    /*                        Auto-Compounding MasterChef State                   */
-    /* -------------------------------------------------------------------------- */
-
     /// @notice Global cumulative reward index (scaled by INDEX_PRECISION for precision)
-    /// @dev This increases when new rewards are added to the pool
-    /// Formula: globalRewardIndex += (newRewards * INDEX_PRECISION) / totalStaked
     uint256 public globalRewardIndex;
 
     /// @notice Tracks each user's reward snapshot to prevent double-claiming
-    /// @dev Updated after balance changes using: (userBalance * globalRewardIndex) / INDEX_PRECISION
-    /// Formula: pendingRewards = (userBalance * (globalRewardIndex - userIndexSnapshot)) / INDEX_PRECISION
     mapping(address => uint256) public userIndexSnapshot;
 
-    /// @notice Buffer for rewards received when no stakers are present
-    /// @dev These rewards are distributed when the first user stakes
-    uint256 public unallocatedBuffer;
+    /// @notice Rewards that have been distributed but not yet claimed by users
+    uint256 public unallocatedRewards;
+
+    /// @notice Registry of approved distributors (Merkle drop contracts, quest engines, etc.)
+    mapping(address => bool) public isDistributor;
 
     /* -------------------------------------------------------------------------- */
     /*                                  Events                                    */
@@ -110,6 +96,8 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
     event BurnPercentageUpdated(uint256 oldPercentage, uint256 newPercentage);
     event TokensRecovered(address indexed token, uint256 amount, address indexed to);
     event EthSwept(uint256 amount, address indexed to);
+    event DistributorUpdated(address indexed distributor, bool status);
+    event BoostedStake(address indexed distributor, address indexed user, uint256 amount);
 
     /* -------------------------------------------------------------------------- */
     /*                               Constructor                                  */
@@ -122,288 +110,260 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                              User Functions                                */
+    /*                                    User                                    */
     /* -------------------------------------------------------------------------- */
 
     /**
      * @notice Stake HLG tokens to earn auto-compounding rewards
-     * @dev Rewards automatically compound into your balance - no separate claiming needed
      * @param amount Amount of HLG to stake
      */
     function stake(uint256 amount) external nonReentrant whenNotPaused {
         if (amount == 0) revert ZeroAmount();
 
-        // Auto-compound any pending rewards first
+        uint256 actualAmount = _pullHLG(msg.sender, amount);
         updateUser(msg.sender);
-
-        // Transfer tokens from user with fee-on-transfer protection
-        uint256 balanceBefore = HLG.balanceOf(address(this));
-        HLG.safeTransferFrom(msg.sender, address(this), amount);
-        uint256 balanceAfter = HLG.balanceOf(address(this));
-        uint256 actualAmount = balanceAfter - balanceBefore;
-
-        if (actualAmount != amount) revert FeeOnTransferNotSupported();
-
-        // Handle case where this is the first staker and we have buffered rewards
-        bool isFirstStaker = (totalStaked == 0);
-
-        // Add new stake to user's balance
         balanceOf[msg.sender] += actualAmount;
         totalStaked += actualAmount;
-
-        // If first staker and we have buffered rewards, give them all to first staker as genesis bonus
-        if (isFirstStaker && unallocatedBuffer > 0) {
-            uint256 bufferedRewards = unallocatedBuffer;
-            unallocatedBuffer = 0;
-
-            // Give all buffered rewards to the first staker as genesis bonus
-            balanceOf[msg.sender] += bufferedRewards;
-            totalStaked += bufferedRewards;
-
-            emit RewardsCompounded(msg.sender, bufferedRewards);
-        }
-
-        // Update user's snapshot to current index (important for new stakers)
-        userIndexSnapshot[msg.sender] = globalRewardIndex;
 
         emit Staked(msg.sender, actualAmount);
     }
 
     /**
      * @notice Unstake entire HLG balance including all accumulated rewards
-     * @dev Must unstake full balance - this is the only way to access your rewards
-     * @dev Your balance includes original stake + all auto-compounded rewards
-     * @dev Can be called even when paused to allow exits during emergencies
+     * @dev Auto-compounds first, then transfers full balance. Can be called while paused.
      */
     function unstake() external nonReentrant {
-        // Auto-compound any pending rewards first
         updateUser(msg.sender);
 
         uint256 userBalance = balanceOf[msg.sender];
         if (userBalance == 0) revert NoStake();
 
-        // Reset user's state
         balanceOf[msg.sender] = 0;
-        userIndexSnapshot[msg.sender] = 0; // Reset snapshot
-        totalStaked -= userBalance;
-
-        // Transfer full balance (original stake + compounded rewards)
+        userIndexSnapshot[msg.sender] = 0;
+        unchecked {
+            totalStaked -= userBalance;
+        }
         HLG.safeTransfer(msg.sender, userBalance);
         emit Unstaked(msg.sender, userBalance);
     }
 
     /**
-     * @notice Emergency exit without claiming rewards (like MasterChef emergencyWithdraw)
-     * @dev Withdraws only the original stake amount, forfeiting any pending rewards
-     * @dev Can be called even when paused for emergency situations
+     * @notice Emergency exit without compounding pending rewards
+     * @dev Does not call updateUser; returns current recorded balance. Can be called while paused.
      */
     function emergencyExit() external nonReentrant {
         uint256 userBalance = balanceOf[msg.sender];
         if (userBalance == 0) revert NoStake();
 
-        // Reset user's state without updating rewards
         balanceOf[msg.sender] = 0;
         userIndexSnapshot[msg.sender] = 0;
-        totalStaked -= userBalance;
-
-        // Transfer balance without compounding rewards (emergency exit)
+        unchecked {
+            totalStaked -= userBalance;
+        }
         HLG.safeTransfer(msg.sender, userBalance);
         emit EmergencyExit(msg.sender, userBalance);
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                           Bootstrap Operations                             */
+    /*                                  Funding                                   */
     /* -------------------------------------------------------------------------- */
 
     /**
-     * @notice Deposit HLG and distribute according to burn/reward percentage split
-     * @dev Used for manual bootstrap operations before FeeRouter integration
-     * @param hlgAmount Total HLG to process (will be split according to burnPercentage)
+     * @notice Deposit HLG and distribute according to burn/reward split.
+     * @param hlgAmount HLG to pull from caller
+     * @dev Splits burn/reward and updates the index. If there are no stakers,
+     *      this call is a no-op.
      */
     function depositAndDistribute(uint256 hlgAmount) external onlyOwner nonReentrant {
+        if (_activeStaked() == 0) return;
         if (hlgAmount == 0) revert ZeroAmount();
 
-        // Transfer HLG from caller with fee-on-transfer protection
-        uint256 balanceBefore = HLG.balanceOf(address(this));
-        HLG.safeTransferFrom(msg.sender, address(this), hlgAmount);
-        uint256 balanceAfter = HLG.balanceOf(address(this));
-        uint256 actualAmount = balanceAfter - balanceBefore;
+        uint256 active = _activeStaked();
+        uint256 netReward = (hlgAmount * (MAX_PERCENTAGE - burnPercentage)) / MAX_PERCENTAGE;
+        if ((netReward * INDEX_PRECISION) / active == 0) revert RewardTooSmall();
 
-        if (actualAmount != hlgAmount) revert FeeOnTransferNotSupported();
+        uint256 received = _pullHLG(msg.sender, hlgAmount); // exact amount enforced
+        uint256 burnAmount = (received * burnPercentage) / MAX_PERCENTAGE;
+        uint256 rewardAmount = received - burnAmount;
 
-        // Calculate burn/reward split based on burnPercentage
-        uint256 burnAmount = (actualAmount * burnPercentage) / MAX_PERCENTAGE;
-        uint256 rewardAmount = actualAmount - burnAmount;
-
-        // NOTE: HLG (0x740df024CE73f589ACD5E8756b377ef8C6558BaB) exposes burn/burnFrom,
-        // but they require an allowance. Using transfer(address(0)) is universally safe
-        // and still decreases total supply onchain (see HLG implementation).
-        HLG.safeTransfer(address(0), burnAmount);
-
-        // Distribute the remaining portion as auto-compounding rewards
+        _burnHLG(burnAmount);
         _addRewards(rewardAmount);
 
-        // Emit event after state changes for consistent indexing
-        emit RewardsDistributed(actualAmount, burnAmount, rewardAmount);
+        emit RewardsDistributed(received, burnAmount, rewardAmount);
     }
 
-    /* -------------------------------------------------------------------------- */
-    /*                      Future Automated Integration                          */
-    /* -------------------------------------------------------------------------- */
-
     /**
-     * @notice Add rewards from FeeRouter (automated flow)
-     * @dev Handles burn/reward distribution according to burnPercentage, same as manual bootstrap
-     * @param amount Total amount of HLG to process (will be split according to burnPercentage)
+     * @notice Add rewards from FeeRouter (automated flow).
+     * @param amount HLG to pull from FeeRouter
+     * @dev Splits burn/reward and updates the index. If there are no stakers,
+     *      this call is a no-op.
      */
     function addRewards(uint256 amount) external nonReentrant {
         if (msg.sender != feeRouter) revert Unauthorized();
+        if (_activeStaked() == 0) return;
         if (amount == 0) revert ZeroAmount();
 
-        // Transfer HLG from FeeRouter with fee-on-transfer protection
-        uint256 balanceBefore = HLG.balanceOf(address(this));
-        HLG.safeTransferFrom(msg.sender, address(this), amount);
-        uint256 balanceAfter = HLG.balanceOf(address(this));
-        uint256 actualAmount = balanceAfter - balanceBefore;
+        uint256 active = _activeStaked();
+        uint256 netReward = (amount * (MAX_PERCENTAGE - burnPercentage)) / MAX_PERCENTAGE;
+        if ((netReward * INDEX_PRECISION) / active == 0) revert RewardTooSmall();
 
-        if (actualAmount != amount) revert FeeOnTransferNotSupported();
+        uint256 received = _pullHLG(msg.sender, amount);
+        uint256 burnAmount = (received * burnPercentage) / MAX_PERCENTAGE;
+        uint256 rewardAmount = received - burnAmount;
 
-        // Calculate burn/reward split based on burnPercentage
-        uint256 burnAmount = (actualAmount * burnPercentage) / MAX_PERCENTAGE;
-        uint256 rewardAmount = actualAmount - burnAmount;
-
-        // NOTE: HLG (0x740dF024Ce73F589AcD5E8756B377eF8C6558BaB) exposes burn/burnFrom,
-        // but they require an allowance. Using transfer(address(0)) is universally safe
-        // and still decreases total supply onchain (see HLG implementation).
-        HLG.safeTransfer(address(0), burnAmount);
-
-        // Distribute remaining portion as auto-compounding rewards
+        _burnHLG(burnAmount);
         _addRewards(rewardAmount);
 
-        // Emit event after state changes for consistent indexing
-        emit RewardsDistributed(actualAmount, burnAmount, rewardAmount);
+        emit RewardsDistributed(received, burnAmount, rewardAmount);
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                      Core Auto-Compounding Functions                       */
+    /*                                  Internals                                 */
     /* -------------------------------------------------------------------------- */
 
     /**
-     * @notice Update user's reward state and auto-compound pending rewards
-     * @dev Uses MasterChef V2 algorithm with 1e12 precision for gas efficiency
+     * @notice Get active staked amount (excluding unallocated rewards)
+     * @return Amount of HLG actively staked by users
+     */
+    function _activeStaked() internal view returns (uint256) {
+        return totalStaked - unallocatedRewards;
+    }
+
+    /**
+     * @notice Internal helper to pull HLG tokens with safety checks
+     * @dev Rejects fee-on-transfer tokens; requires exact amount received
+     * @param from Address to pull tokens from
+     * @param amount Expected amount to receive
+     * @return actualAmount Amount actually received (equals amount or reverts)
+     */
+    function _pullHLG(address from, uint256 amount) internal returns (uint256 actualAmount) {
+        uint256 balanceBefore = HLG.balanceOf(address(this));
+        HLG.safeTransferFrom(from, address(this), amount);
+        uint256 balanceAfter = HLG.balanceOf(address(this));
+        actualAmount = balanceAfter - balanceBefore;
+        if (actualAmount == 0) revert NoTokensReceived();
+        if (actualAmount != amount) revert FeeOnTransferNotSupported();
+    }
+
+    /**
+     * @notice Updates reward state for an account, compounding any pending amount.
+     * @dev Sets the snapshot to the current index after compounding.
      * @param account Address to update rewards for
      */
     function updateUser(address account) public {
         uint256 userBalance = balanceOf[account];
+        uint256 currentIndex = globalRewardIndex;
+        uint256 snapshot = userIndexSnapshot[account];
+
         if (userBalance > 0) {
-            // Calculate pending rewards using MasterChef V2 formula
-            // pendingRewards = userBalance * (globalRewardIndex - userIndexSnapshot) / INDEX_PRECISION
-            uint256 pendingRewards = (userBalance * (globalRewardIndex - userIndexSnapshot[account])) / INDEX_PRECISION;
+            uint256 indexDelta = currentIndex - snapshot;
+            if (indexDelta != 0) {
+                uint256 pendingRewards = (userBalance * indexDelta) / INDEX_PRECISION;
+                if (pendingRewards > 0) {
+                    // Make sure we have enough rewards available to give to the user
+                    uint256 unalloc = unallocatedRewards;
+                    if (pendingRewards > unalloc) revert NotEnoughRewardsAvailable();
 
-            if (pendingRewards > 0) {
-                // Auto-compound: add rewards directly to user's balance
-                balanceOf[account] += pendingRewards;
-
-                // Update total staked to account for compounded rewards
-                totalStaked += pendingRewards;
-
-                emit RewardsCompounded(account, pendingRewards);
+                    balanceOf[account] = userBalance + pendingRewards;
+                    unallocatedRewards = unalloc - pendingRewards;
+                    emit RewardsCompounded(account, pendingRewards);
+                }
             }
         }
-
-        // Update user's snapshot to current global index (prevents double-claiming)
-        userIndexSnapshot[account] = globalRewardIndex;
+        userIndexSnapshot[account] = currentIndex;
     }
 
     /**
-     * @notice Add rewards to the pool with buffer-aware distribution
-     * @dev Handles the case where no stakers exist by using unallocated buffer
+     * @notice Safely burn HLG tokens with supply reduction verification
+     * @param amount Amount of HLG to burn
+     */
+    function _burnHLG(uint256 amount) internal {
+        if (amount == 0) return;
+
+        // Assert that transfer-to-zero actually burns supply on HLG
+        uint256 supplyBefore = HLG.totalSupply();
+        HLG.safeTransfer(address(0), amount);
+        uint256 supplyAfter = HLG.totalSupply();
+
+        // If supply did not decrease by exactly amount, revert and revert the transfer
+        if (supplyBefore != supplyAfter + amount) revert BurnFailed();
+    }
+
+    /**
+     * @notice Add rewards to the pool for immediate distribution
      * @param rewardAmount Amount of HLG rewards to distribute to stakers
      */
     function _addRewards(uint256 rewardAmount) internal {
         if (rewardAmount == 0) return;
 
-        // Handle unallocated buffer first (rewards received when no stakers)
-        if (unallocatedBuffer > 0 && totalStaked > 0) {
-            // Distribute previously buffered rewards now that we have stakers
-            uint256 bufferedRewards = unallocatedBuffer;
-            unallocatedBuffer = 0;
+        uint256 active = _activeStaked();
+        // index bump uses active stake
+        globalRewardIndex += (rewardAmount * INDEX_PRECISION) / active;
 
-            // Update global index with buffered rewards
-            globalRewardIndex += (bufferedRewards * INDEX_PRECISION) / totalStaked;
-        }
-
-        if (totalStaked == 0) {
-            // No stakers - add to buffer for later distribution
-            unallocatedBuffer += rewardAmount;
-            return;
-        }
-
-        // Update global reward index using MasterChef V2 formula with 1e12 precision
-        globalRewardIndex += (rewardAmount * INDEX_PRECISION) / totalStaked;
+        // Track the full reward amount for distribution to users
+        unallocatedRewards += rewardAmount;
+        totalStaked += rewardAmount;
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                              View Functions                                */
+    /*                                    Views                                   */
     /* -------------------------------------------------------------------------- */
+
+    function _pendingRewards(address account) internal view returns (uint256) {
+        uint256 userBalance = balanceOf[account];
+        if (userBalance == 0) return 0;
+        return (userBalance * (globalRewardIndex - userIndexSnapshot[account])) / INDEX_PRECISION;
+    }
 
     /**
      * @notice Calculate pending rewards for a user (not yet compounded)
-     * @dev Shows rewards that would be compounded into balance on next interaction
      * @param account Address to check pending rewards for
      * @return Amount of pending auto-compound rewards
      */
     function earned(address account) external view returns (uint256) {
-        uint256 accountBalance = balanceOf[account];
-        if (accountBalance == 0) return 0;
-
-        // Calculate pending rewards using MasterChef V2 formula with 1e12 precision
-        return (accountBalance * (globalRewardIndex - userIndexSnapshot[account])) / INDEX_PRECISION;
+        return _pendingRewards(account);
     }
 
     /**
      * @notice Get current global reward index
-     * @dev This index increases as rewards are added to the pool
-     * @return Current global reward index (scaled by INDEX_PRECISION = 1e12)
+     * @return Current global reward index (1e12 scaling)
      */
     function rewardPerToken() external view returns (uint256) {
         return globalRewardIndex;
     }
 
     /**
-     * @notice Get user's share of total staked pool
+     * @notice Get user's share of active staked pool (excluding unallocated rewards)
      * @param user Address to check
      * @return User's percentage share in basis points (10000 = 100%)
      */
     function getUserShare(address user) external view returns (uint256) {
-        if (totalStaked == 0) return 0;
-        return (balanceOf[user] * 10000) / totalStaked;
+        uint256 active = _activeStaked();
+        if (active == 0) return 0;
+        return (balanceOf[user] * MAX_PERCENTAGE) / active;
     }
 
     /**
      * @notice Calculate user's total balance including pending rewards
-     * @dev This is what they would receive if they unstaked right now
      * @param user Address to check
      * @return Total balance (current stake + pending compounded rewards)
      */
     function balanceWithPendingRewards(address user) external view returns (uint256) {
-        uint256 currentBalance = balanceOf[user];
-        uint256 pendingRewards = this.earned(user);
-        return currentBalance + pendingRewards;
+        return balanceOf[user] + _pendingRewards(user);
     }
 
     /**
-     * @notice Get available rewards in contract ready for distribution
-     * @dev Contract balance minus total staked amounts
-     * @return Amount of HLG available for future reward distributions
+     * @notice Returns extra HLG tokens that can be recovered
+     * @dev Shows HLG.balanceOf(this) - totalStaked
+     * @return Amount of extra HLG tokens available for recovery
      */
-    function getAvailableRewards() external view returns (uint256) {
+    function getExtraTokens() external view returns (uint256) {
         uint256 contractBalance = HLG.balanceOf(address(this));
         return contractBalance > totalStaked ? contractBalance - totalStaked : 0;
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                              Admin Functions                               */
+    /*                                    Admin                                   */
     /* -------------------------------------------------------------------------- */
 
     /**
@@ -419,7 +379,6 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
     /**
      * @notice Set burn percentage for reward distribution
      * @param _burnPercentage Percentage of rewards to burn (in basis points, 10000 = 100%)
-     * @dev Remaining percentage (10000 - _burnPercentage) goes to stakers as rewards
      */
     function setBurnPercentage(uint256 _burnPercentage) external onlyOwner {
         if (_burnPercentage > MAX_PERCENTAGE) revert InvalidBurnPercentage();
@@ -446,7 +405,6 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
 
     /**
      * @notice Emergency function to recover tokens (not HLG)
-     * @dev Useful if someone accidentally sends wrong tokens to this contract
      * @param token Token address to recover
      * @param to Address to send recovered tokens to
      * @param amountMinimum Minimum amount that must be available to recover
@@ -463,8 +421,41 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /**
+     * @notice Recover extra HLG tokens that were sent directly to contract
+     * @param to Address to send extra HLG to
+     * @param amount Amount of extra HLG to recover
+     */
+    function recoverExtraHLG(address to, uint256 amount) external onlyOwner nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        uint256 bal = HLG.balanceOf(address(this));
+        uint256 free = bal > totalStaked ? bal - totalStaked : 0;
+        if (amount > free) revert NotEnoughExtraTokens();
+        HLG.safeTransfer(to, amount);
+        emit TokensRecovered(address(HLG), amount, to);
+    }
+
+    /**
+     * @notice Reclaim unallocated rewards when there are no active stakers
+     * @param to Address to send unallocated rewards to
+     */
+    function reclaimUnallocatedRewards(address to) external onlyOwner nonReentrant {
+        if (to == address(0)) revert ZeroAddress();
+        if (_activeStaked() != 0) revert ActiveStakeExists();
+
+        uint256 u = unallocatedRewards;
+        if (u == 0) revert ZeroAmount();
+
+        unallocatedRewards = 0;
+        unchecked {
+            totalStaked -= u;
+        }
+        HLG.safeTransfer(to, u);
+
+        emit TokensRecovered(address(HLG), u, to);
+    }
+
+    /**
      * @notice Sweep ETH that may have been force-sent to the contract
-     * @dev Protects against selfdestruct attacks that force ETH into the contract
      * @param to Address to send the ETH to
      */
     function sweepETH(address payable to) external onlyOwner nonReentrant {
@@ -479,36 +470,25 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
         emit EthSwept(balance, to);
     }
 
-    /* -------------------------------------------------------------------------- */
-    /*                          Referral Batch Operations                         */
-    /* -------------------------------------------------------------------------- */
-
     /**
-     * @notice Stake HLG tokens on behalf of a user (owner only)
-     * @dev Used for referral rewards and airdrops, only callable when paused
-     * @param user Address to stake for
+     * @notice Credit HLG stake on behalf of a user (owner-only, paused-only)
+     * @param user Address to receive the stake credit
      * @param amount Amount of HLG to stake
      */
     function stakeFor(address user, uint256 amount) public nonReentrant onlyOwner whenPaused {
         if (user == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
 
-        // Auto-compound any pending rewards first
+        _pullHLG(msg.sender, amount);
         updateUser(user);
-
-        // Update user balance and total staked
         balanceOf[user] += amount;
         totalStaked += amount;
-
-        // Update user's snapshot to current index
-        userIndexSnapshot[user] = globalRewardIndex;
 
         emit Staked(user, amount);
     }
 
     /**
      * @notice Batch stake HLG tokens for multiple users (gas optimized)
-     * @dev Processes a range of users from the provided arrays for gas-bounded execution
      * @param users Array of user addresses to stake for
      * @param amounts Array of amounts to stake for each user
      * @param startIndex Starting index in the arrays to process
@@ -520,12 +500,11 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
         whenPaused
         nonReentrant
     {
-        // Validate inputs
         if (users.length != amounts.length) revert ArrayLengthMismatch();
         if (endIndex > users.length) revert EndIndexOutOfBounds();
         if (startIndex >= endIndex) revert InvalidIndexRange();
 
-        // Calculate total amount needed for this batch
+        // Validate all inputs and calculate total amount
         uint256 totalAmount;
         for (uint256 i = startIndex; i < endIndex;) {
             if (users[i] == address(0)) revert ZeroAddress();
@@ -536,29 +515,18 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
             }
         }
 
-        // Single transfer for entire batch (gas optimization)
-        uint256 balanceBefore = HLG.balanceOf(address(this));
-        HLG.safeTransferFrom(msg.sender, address(this), totalAmount);
-        uint256 balanceAfter = HLG.balanceOf(address(this));
-        if (balanceAfter - balanceBefore != totalAmount) revert FeeOnTransferNotSupported();
+        _pullHLG(msg.sender, totalAmount);
 
-        // Process each user in the batch
+        // Process each user: compound existing rewards, add new stake
         for (uint256 i = startIndex; i < endIndex;) {
             address user = users[i];
             uint256 amount = amounts[i];
 
-            // Auto-compound any existing rewards
             updateUser(user);
-
-            // Update balances
             balanceOf[user] += amount;
             totalStaked += amount;
 
-            // Set user's index snapshot to prevent earning on pre-staked amount
-            userIndexSnapshot[user] = globalRewardIndex;
-
             emit Staked(user, amount);
-
             unchecked {
                 ++i;
             }
@@ -566,15 +534,55 @@ contract StakingRewards is Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /* -------------------------------------------------------------------------- */
-    /*                            Fallback Functions                              */
+    /*                                Distributors                                */
     /* -------------------------------------------------------------------------- */
 
-    /// @notice Reject direct ETH transfers (but allow forced transfers from selfdestruct)
+    /**
+     * @notice Whitelist/delist a distributor contract for future campaigns
+     * @param distributor Address of the distributor contract
+     * @param status True to whitelist, false to delist
+     */
+    function setDistributor(address distributor, bool status) external onlyOwner {
+        if (distributor == address(0)) revert ZeroAddress();
+        isDistributor[distributor] = status;
+        emit DistributorUpdated(distributor, status);
+    }
+
+    /**
+     * @notice Credit stake on behalf of user (called by whitelisted distributors)
+     * @param user Wallet to receive the staked HLG
+     * @param amount HLG amount to stake (pulled from distributor)
+     */
+    function stakeFromDistributor(address user, uint256 amount) external nonReentrant whenNotPaused {
+        if (!isDistributor[msg.sender]) revert NotWhitelistedDistributor();
+        if (user == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+
+        _pullHLG(msg.sender, amount);
+        updateUser(user);
+        balanceOf[user] += amount;
+        totalStaked += amount;
+
+        emit Staked(user, amount);
+        emit BoostedStake(msg.sender, user, amount);
+    }
+
+    /* -------------------------------------------------------------------------- */
+    /*                                    Fallback                                */
+    /* -------------------------------------------------------------------------- */
+
+    /**
+     * @notice Reject ETH sent to the contract
+     * @dev Prevents accidental ETH transfers to the contract
+     */
     receive() external payable {
         revert NoEtherAccepted();
     }
 
-    /// @notice Reject fallback calls
+    /**
+     * @notice Reject calls to the contract
+     * @dev Prevents accidental calls to the contract
+     */
     fallback() external payable {
         revert InvalidCall();
     }
